@@ -60,8 +60,10 @@ jobs:
 
       - name: Set Terraform variables
         if: ${{ secrets.tf_vars != '' }}
+        env:
+          TF_VARS_JSON: ${{ secrets.tf_vars }}
         run: |
-          echo '${{ secrets.tf_vars }}' | \
+          echo "$TF_VARS_JSON" | \
             jq -r 'to_entries[] | "TF_VAR_\(.key)=\(.value)"' >> "$GITHUB_ENV"
 
       - name: Apply

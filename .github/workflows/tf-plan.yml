@@ -53,8 +53,10 @@ jobs:
 
       - name: Set Terraform variables
         if: ${{ secrets.tf_vars != '' }}
+        env:
+          TF_VARS_JSON: ${{ secrets.tf_vars }}
         run: |
-          echo '${{ secrets.tf_vars }}' | \
+          echo "$TF_VARS_JSON" | \
             jq -r 'to_entries[] | "TF_VAR_\(.key)=\(.value)"' >> "$GITHUB_ENV"
 
       - name: Init
@@ -70,10 +72,11 @@ jobs:
         working-directory: ${{ inputs.working_directory }}
         run: |
           terraform plan -no-color -out=tfplan -lock-timeout=120s
+          delimiter="$(dd if=/dev/urandom bs=15 count=1 status=none | base64)"
           {
-            echo 'PLAN<<EOF'
+            echo "PLAN<<${delimiter}"
             terraform show -no-color tfplan
-            echo 'EOF'
+            echo "${delimiter}"
           } >> "$GITHUB_OUTPUT"
 
       - name: Comment plan on PR

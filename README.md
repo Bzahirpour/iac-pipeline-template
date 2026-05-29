@@ -1,49 +1,20 @@
 # iac-pipeline-template
 
-A reusable IaC baseline for AWS Terraform projects. Contains:
-
-- **Reusable GitHub Actions workflows** — lint/security scan, plan-with-PR-comment, and apply with a required prod approval gate. Projects call these workflows by reference — pipeline logic lives here, not duplicated per project.
-- **Bootstrap module** — provisions the S3 remote state bucket and GitHub Actions IAM role (OIDC, no stored credentials) for a new project. State locking is handled natively by S3 via `use_lockfile = true`.
-- **Scaffolding** — `infra/envs/dev` and `infra/envs/prod` stubs, a module skeleton, `.gitignore`, and `.tflint.hcl` ready to go.
-
-## Pipeline architecture
-
-```mermaid
-flowchart TD
-    PR["Pull request\n(infra/** changed)"] --> Lint
-    Push["Push to main\n(infra/** changed)"] --> Lint
-
-    subgraph Lint["tf-lint.yml"]
-        fmt["terraform fmt -check"] --> tflint --> tfsec
-    end
-
-    Lint -->|PR only| Plan
-    subgraph Plan["tf-plan.yml × 2 (dev + prod)"]
-        init["terraform init"] --> validate --> plan["terraform plan"] --> comment["Post plan as PR comment"]
-    end
-
-    Lint -->|push to main| ApplyDev
-    subgraph ApplyDev["tf-apply.yml — dev"]
-        ad["terraform apply\n(no approval required)"]
-    end
-
-    ApplyDev --> ApplyProd
-    subgraph ApplyProd["tf-apply.yml — prod"]
-        gate["⏸ GitHub environment\napproval gate"] --> ap["terraform apply"]
-    end
-```
+A GitHub template repository for AWS Terraform projects. Provides a hardened CI/CD pipeline (lint, validate, plan, Trivy + Checkov security scans with SARIF upload to GitHub Code Scanning, Infracost estimate, sticky PR comment, and Claude security review on every PR; environment-gated apply for `dev` and `prod` on push to `main`), a bootstrap module for the S3 remote state bucket and OIDC IAM role, scaffolded `dev` and `prod` Terraform workspaces, and pinned Dependabot updates for both GitHub Actions and Terraform providers.
 
 ## Using this as a GitHub template
 
-1. Click **Use this template** → **Create a new repository** on this repo's GitHub page.
+1. On this repo's GitHub page, click **Use this template** → **Create a new repository**.
 2. Clone your new repo and work through the [New project setup checklist](#new-project-setup-checklist) below.
 
 ## New project setup checklist
 
-### 1. Bootstrap remote state and OIDC (one-time per project)
+### a. Bootstrap state bucket and OIDC role
 
 ```bash
 cd bootstrap
+terraform init
+terraform apply
 ```
 
 Edit `variables.tf` defaults (or pass via `-var`):
@@ -53,108 +24,109 @@ Edit `variables.tf` defaults (or pass via `-var`):
 | `project_name` | Your project name, e.g. `my-project` |
 | `github_org` | Your GitHub username or org |
 | `github_repo` | The new repo name |
-| `create_oidc_provider` | `false` if you already have the GitHub OIDC provider in this AWS account |
+| `create_oidc_provider` | `false` if you already have the GitHub OIDC provider in this AWS account (only one is allowed per account — import the existing one with `terraform import aws_iam_openid_connect_provider.github <arn>`) |
 
-Then:
+Note the outputs — `tf_state_bucket` and `github_actions_role_arn`. You'll need them for the next steps. Paste `tf_state_bucket` into both `infra/envs/dev/primary/backend.tf` and `infra/envs/prod/primary/backend.tf` (replacing the `REPLACE-ME` placeholder).
 
-```bash
-terraform init
-terraform apply
-```
+### b. Set GitHub Variables
 
-Note the outputs — you need them in the next steps:
+In your new repo → **Settings → Secrets and variables → Actions → Variables tab**:
 
-```
-tf_state_bucket          = "my-project-tfstate-123456789012"
-github_actions_role_arn  = "arn:aws:iam::123456789012:role/my-project-github-actions"
-```
-
-> If `create_oidc_provider = false`, import the existing provider first:
-> ```bash
-> terraform import aws_iam_openid_connect_provider.github <existing-arn>
-> ```
-
-### 2. Update backend configuration
-
-Paste the `tf_state_bucket` output into both `infra/envs/dev/backend.tf` and `infra/envs/prod/backend.tf`, replacing the `REPLACE-ME` placeholder.
-
-### 3. Update tfvars
-
-Set `project_name` in `infra/envs/dev/terraform.tfvars` and `infra/envs/prod/terraform.tfvars`.
-
-### 4. Set GitHub repository secrets
-
-In your new repo → **Settings → Secrets and variables → Actions**:
-
-| Secret | Value |
+| Variable | Value |
 |---|---|
+| `AWS_REGION` | The AWS region you bootstrapped in (e.g. `us-east-1`) |
 | `AWS_ROLE_ARN` | The `github_actions_role_arn` output from bootstrap |
-| `TF_VARS` | JSON object of your Terraform variables (see below) |
 
-**`TF_VARS` format:**
+### c. Set GitHub Secrets — in BOTH the Actions scope and the Dependabot scope
 
-```json
-{"alarm_email": "you@example.com", "other_var": "value"}
-```
+In your new repo → **Settings → Secrets and variables**, add the following to **both** the **Actions** tab and the **Dependabot** tab:
 
-Each key becomes a `TF_VAR_<key>` environment variable during plan and apply. If your project has no `terraform` input variables that need secrets, you can omit `TF_VARS` entirely.
+| Secret | Used by | Where to get one |
+|---|---|---|
+| `CLAUDE_API_KEY` | `claude-review` job in `pr-checks.yml` | https://console.anthropic.com |
+| `INFRACOST_API_KEY` | `infracost` job in `pr-checks.yml` | https://www.infracost.io/ (free tier available) |
 
-### 5. Create GitHub environments
+> **GitHub has a separate secret scope for Dependabot.** Secrets added to the Actions scope are not visible to Dependabot-triggered workflow runs. Dependabot opens PRs that re-run `pr-checks.yml`, so it needs the same secrets. **Missing the Dependabot scope is the single most common failure mode** — Dependabot PRs will fail with confusing "API key not found" errors until you add the secrets there too.
+
+### d. Configure GitHub Environments
 
 In your new repo → **Settings → Environments**, create two environments:
 
-- `dev` — no protection rules required
-- `prod` — add **Required reviewers** (yourself) to enforce the approval gate
+- `dev` — add **Required reviewers** (yourself) to enforce the approval gate before applying to dev.
+- `prod` — add **Required reviewers** (yourself) to enforce the approval gate before applying to prod.
 
-### 6. Copy the caller workflow
+Both environments must exist for `apply.yml` to run; both should have required reviewers.
 
-Copy `.github/workflows/terraform.yml` from this repo into your new project's `.github/workflows/terraform.yml`. It already references the reusable workflows here — no changes needed unless you want to override `tf_version` or `aws_region`.
+### e. Adjust the env layout if you change the defaults
 
-### 7. Add your modules
+This template ships with `infra/envs/dev/primary/` and `infra/envs/prod/primary/`. The `/primary` layer is intentional — it leaves room to add sibling workspaces (e.g. `/secondary`, `/global`) alongside `/primary` in the same env without restructuring later.
 
-Rename or copy `infra/modules/_example/` as a starting point for each module. Wire modules into `infra/envs/dev/main.tf` and `infra/envs/prod/main.tf`.
+If you rename, remove, or add workspaces, update `.github/dependabot.yml`'s `terraform` `directories` list and the working-directory paths in `.github/workflows/pr-checks.yml` and `.github/workflows/apply.yml` accordingly.
 
-## Reusable workflow reference
+### f. Scope down the bootstrap IAM role (optional but recommended)
 
-All three workflows live in `.github/workflows/` and are called with `uses: Bzahirpour/iac-pipeline-template/.github/workflows/<file>@main`.
+`bootstrap/main.tf` attaches `AdministratorAccess` to the GitHub Actions role for simplicity. Once you know which AWS services your project actually uses, replace this with a least-privilege policy.
 
-### `tf-lint.yml`
+## CI/CD gate
 
-| Input | Type | Default | Description |
-|---|---|---|---|
-| `tf_version` | string | `1.14.8` | Terraform version |
-| `tflint_version` | string | `v0.50.3` | tflint version |
-| `working_directory` | string | `infra` | Directory for fmt check and tflint |
+Two workflows replaced the original `terraform.yml`:
 
-### `tf-plan.yml`
+### `pr-checks.yml` — every PR targeting `main` that touches `infra/**`
 
-| Input | Type | Required | Description |
-|---|---|---|---|
-| `environment` | string | yes | Label shown in PR comment (`dev`, `prod`) |
-| `working_directory` | string | yes | Path to the env workspace |
-| `aws_region` | string | no | Default `us-east-1` |
-| `tf_version` | string | no | Default `1.14.8` |
+```
+lint → validate (dev + prod) → plan (dev + prod) → scan (dev + prod)
+                                                 ↘ infracost (dev + prod)
+                                                       ↓
+                                                    comment (sticky)
+claude-review (independent lane)
+```
 
-| Secret | Required | Description |
+| Job | What it does | Gates merge? |
 |---|---|---|
-| `aws_role_arn` | yes | IAM role assumed via OIDC |
-| `tf_vars` | no | JSON object of Terraform variable values |
+| `lint` | `terraform fmt -check` + tflint | Yes |
+| `validate` | `init -backend=false` + `validate` (no AWS creds) | Yes |
+| `plan` | Full plan via OIDC; uploads plan.json + plan.txt as artifacts | Yes |
+| `scan` | Trivy + Checkov against resolved `plan.json`; SARIF → Code Scanning | Yes (HIGH/CRITICAL) |
+| `infracost` | Cost estimate from plan JSON | No |
+| `comment` | Single sticky comment: plan + Trivy + Checkov + cost per env | No |
+| `claude-review` | Claude posts its own security review comment | No |
 
-### `tf-apply.yml`
+### `apply.yml` — push to `main` that touches `infra/**`
 
-Same inputs and secrets as `tf-plan.yml`, plus:
+```
+plan-dev → apply-dev (env gate) → plan-prod → apply-prod (env gate)
+```
 
-| Input | Type | Required | Description |
-|---|---|---|---|
-| `github_environment` | string | yes | GitHub environment name for the approval gate |
+Each apply job is gated by a GitHub Environment with required reviewers. Both dev and prod require approval. `concurrency: cancel-in-progress: false` ensures in-flight applies are never cancelled by a subsequent push.
 
-## Scope down the IAM role
+> **Plan drift:** The plan shown in the PR comment is generated from the PR head commit. `apply.yml` re-plans from scratch at merge time. If another PR merged concurrently and changed shared state, the applied plan may differ from what was reviewed. The approval gate before each apply is the moment to catch this.
 
-The bootstrap attaches `AdministratorAccess` for simplicity. Once you know which AWS services your project uses, replace it with a least-privilege policy in `bootstrap/main.tf`:
+### Secrets required
 
-```hcl
-resource "aws_iam_role_policy_attachment" "github_actions_admin" {
-  role       = aws_iam_role.github_actions.name
-  policy_arn = "arn:aws:iam::aws:policy/AdministratorAccess"  # replace this
-}
+| Secret | Used by | Notes |
+|---|---|---|
+| _(none — OIDC)_ | All AWS calls | Role assumed via `<project>-github-actions` |
+| `CLAUDE_API_KEY` | `claude-review` job | Anthropic API key |
+| `INFRACOST_API_KEY` | `infracost` job | Free tier available at infracost.io |
+
+## Repository layout
+
+```
+bootstrap/                # S3 state bucket + OIDC IAM role (one-time, local apply)
+infra/
+  modules/
+    _example/             # Scaffold module — rename or copy as a starting point
+  envs/
+    dev/
+      primary/            # Default dev workspace (add /secondary, /global, etc. as siblings)
+    prod/
+      primary/            # Default prod workspace (add /secondary, /global, etc. as siblings)
+.github/
+  workflows/
+    pr-checks.yml         # lint → validate → plan → scan → infracost → comment + claude-review
+    apply.yml             # plan-dev → apply-dev (gate) → plan-prod → apply-prod (gate)
+  dependabot.yml          # Weekly grouped updates for GitHub Actions + Terraform providers
+.checkov.yaml             # Checkov skip-check list (empty by default)
+.trivyignore              # Trivy suppression list (empty by default)
+.tflint.hcl               # tflint plugin + ruleset configuration
 ```

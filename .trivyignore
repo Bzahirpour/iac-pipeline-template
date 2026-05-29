@@ -1,0 +1,11 @@
+# .trivyignore — suppressions for Trivy config scans run in pr-checks.yml.
+#
+# Format: one entry per line. Blank lines and lines starting with `#` are ignored.
+#   AVD-AWS-0001                    # suppress a check ID globally
+#   AVD-AWS-0001 exp:2026-12-31     # suppress until an expiry date (recommended)
+#
+# Always pair a suppression with a comment explaining why it is safe and, ideally,
+# an `exp:` date so the suppression doesn't outlive its justification. Trivy will
+# stop honoring the entry past the expiry, which forces a review.
+#
+# Reference: https://aquasecurity.github.io/trivy/latest/docs/configuration/filtering/

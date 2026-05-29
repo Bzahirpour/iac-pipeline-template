@@ -1,0 +1,12 @@
+# .checkov.yaml — Checkov configuration for pr-checks.yml.
+#
+# `skip-check` lists Checkov check IDs to suppress globally. Prefer leaving this
+# empty and using inline `# checkov:skip=<CHECK_ID>: <reason>` comments in
+# Terraform code so each suppression carries its justification at the point it
+# applies. Use this file only for findings that genuinely don't apply to the
+# whole project (e.g. a policy your org has formally accepted).
+#
+# Reference: https://www.checkov.io/2.Basics/CLI%20Command%20Reference.html
+#            https://www.checkov.io/2.Basics/Suppressing%20and%20Skipping%20Policies.html
+
+skip-check: []
